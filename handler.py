@@ -14,6 +14,10 @@ import runpod
 # -------------------------
 ASR_MODEL_NAME = os.getenv("PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v3")
 
+# Model cache directory (defaults to network volume mount point)
+CACHE_DIR = os.getenv("HF_HOME", "/runpod-volume/model_cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 # Thresholds / batching knobs
 # Anything <= SHORT_MAX_SEC seconds is considered "short" and eligible for batching.
 SHORT_MAX_SEC = int(os.getenv("SHORT_MAX_SEC", "600"))  # 10 minutes
@@ -36,7 +40,22 @@ MODEL = None
 if not SKIP_MODEL_LOAD:
     import torch
     import nemo.collections.asr as nemo_asr
-    MODEL = nemo_asr.models.ASRModel.from_pretrained(model_name=ASR_MODEL_NAME)
+
+    # Try loading from cache first
+    cached_model_path = os.path.join(CACHE_DIR, ASR_MODEL_NAME.replace("/", "_"))
+    if os.path.exists(cached_model_path):
+        print(f"Loading cached model from {cached_model_path}")
+        MODEL = nemo_asr.models.ASRModel.restore_from(cached_model_path)
+    else:
+        print(f"Downloading model {ASR_MODEL_NAME} and caching to {cached_model_path}")
+        MODEL = nemo_asr.models.ASRModel.from_pretrained(model_name=ASR_MODEL_NAME)
+        # Cache the model for future use
+        try:
+            MODEL.save_to(cached_model_path)
+            print(f"Model cached successfully to {cached_model_path}")
+        except Exception as e:
+            print(f"Warning: Failed to cache model: {e}")
+
     MODEL.eval()
     if torch.cuda.is_available():
         MODEL = MODEL.to("cuda")
