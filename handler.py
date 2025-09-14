@@ -1,6 +1,9 @@
 # handler.py
 import os
 import json
+import tempfile
+import urllib.request
+import uuid
 from typing import List, Dict, Any, Tuple
 
 import runpod
@@ -75,6 +78,35 @@ def _validate_wav_format(src: str) -> str:
         raise ValueError(f"File must be WAV format. Got filename: {filename}")
 
     return src
+
+
+def _download_url_to_temp(url: str) -> str:
+    """
+    Download URL to temporary file for NeMo processing.
+    Returns path to temporary file.
+    """
+    tmp_dir = tempfile.gettempdir()
+    tmp_file = os.path.join(tmp_dir, f"audio-{uuid.uuid4().hex}.wav")
+
+    try:
+        urllib.request.urlretrieve(url, tmp_file)
+        return tmp_file
+    except Exception as e:
+        # Clean up failed download
+        try:
+            os.remove(tmp_file)
+        except:
+            pass
+        raise ValueError(f"Failed to download audio file: {e}")
+
+
+def _cleanup_files(paths: List[str]):
+    """Clean up temporary files."""
+    for path in paths:
+        try:
+            os.remove(path)
+        except:
+            pass
 
 
 def _get_duration_seconds(wav_path: str) -> float:
@@ -158,18 +190,30 @@ def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict
       3) Preserve output order matching the original inputs list
     """
     # 1) Validate format and collect metadata
-    validated: List[Tuple[str, float]] = []  # list of (wav_path, duration)
+    validated: List[Tuple[str, float]] = []  # list of (local_path, duration)
+    temp_files: List[str] = []  # Track temp files for cleanup
+
     for item in inputs:
         src = item["source"]
         try:
-            wav_path = _validate_wav_format(src)
+            _validate_wav_format(src)
+
+            # Download URLs to temp files for NeMo processing
+            if src.startswith('http'):
+                local_path = _download_url_to_temp(src)
+                temp_files.append(local_path)
+            else:
+                local_path = src
+
             # Use provided duration if available, otherwise determine it
             if "duration" in item and item["duration"] is not None:
                 dur = float(item["duration"])
             else:
-                dur = _get_duration_seconds(wav_path)
-            validated.append((wav_path, dur))
+                dur = _get_duration_seconds(local_path)
+            validated.append((local_path, dur))
         except ValueError as e:
+            # Clean up any temp files created so far
+            _cleanup_files(temp_files)
             raise ValueError(f"Invalid audio format for {src}: {e}. Required: 16kHz mono WAV file.")
 
     # 2) Bucketize
@@ -230,8 +274,8 @@ def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict
             results_by_index[idx] = payload
 
     finally:
-        # 5) No cleanup needed since we're not creating temp files
-        pass
+        # 5) Clean up temporary files
+        _cleanup_files(temp_files)
 
     # 6) Return results in original input order
     return [results_by_index[i] for i in range(len(inputs))]
