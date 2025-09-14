@@ -65,15 +65,15 @@ def _validate_wav_format(src: str) -> str:
     Validate that the source is a properly formatted 16kHz mono WAV file.
     Returns the source path if valid, raises ValueError if not.
     """
-    if not src.lower().endswith('.wav'):
-        raise ValueError(f"File must be WAV format. Got: {src}")
-
-    # For URLs, we can't validate format without downloading
-    # Trust that the caller provides correct format
+    # Extract filename from URL (remove query parameters)
     if src.startswith('http'):
-        return src
+        filename = src.split('?')[0]  # Remove query params
+    else:
+        filename = src
 
-    # For local files, we could add more validation here if needed
+    if not filename.lower().endswith('.wav'):
+        raise ValueError(f"File must be WAV format. Got filename: {filename}")
+
     return src
 
 
