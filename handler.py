@@ -163,7 +163,11 @@ def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict
         src = item["source"]
         try:
             wav_path = _validate_wav_format(src)
-            dur = _get_duration_seconds(wav_path)
+            # Use provided duration if available, otherwise determine it
+            if "duration" in item and item["duration"] is not None:
+                dur = float(item["duration"])
+            else:
+                dur = _get_duration_seconds(wav_path)
             validated.append((wav_path, dur))
         except ValueError as e:
             raise ValueError(f"Invalid audio format for {src}: {e}. Required: 16kHz mono WAV file.")
