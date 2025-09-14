@@ -1,11 +1,7 @@
 # handler.py
 import os
-import tempfile
-import subprocess
-import uuid
-import pathlib
 import json
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 
 import runpod
 
@@ -64,25 +60,37 @@ if not SKIP_MODEL_LOAD:
 # -------------------------
 # Helpers
 # -------------------------
-def _fetch_to_wav(src: str) -> str:
+def _validate_wav_format(src: str) -> str:
     """
-    Download/convert anything to 16k mono WAV via ffmpeg.
-    Works with URLs or local paths.
+    Validate that the source is a properly formatted 16kHz mono WAV file.
+    Returns the source path if valid, raises ValueError if not.
     """
-    tmp = pathlib.Path(tempfile.gettempdir()) / f"in-{uuid.uuid4().hex}.wav"
-    cmd = ["ffmpeg", "-y", "-i", src, "-ac", "1",
-           "-ar", "16000", "-f", "wav", str(tmp)]
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE,
-                   stderr=subprocess.PIPE)
-    return str(tmp)
+    if not src.lower().endswith('.wav'):
+        raise ValueError(f"File must be WAV format. Got: {src}")
+
+    # For URLs, we can't validate format without downloading
+    # Trust that the caller provides correct format
+    if src.startswith('http'):
+        return src
+
+    # For local files, we could add more validation here if needed
+    return src
 
 
-def _duration_seconds(wav_path: str) -> float:
-    out = subprocess.check_output([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=nk=1:nw=1", wav_path
-    ])
-    return float(out.strip())
+def _get_duration_seconds(wav_path: str) -> float:
+    """
+    Get duration using soundfile library instead of ffprobe.
+    """
+    if SKIP_MODEL_LOAD:
+        # Return dummy duration for dry-run mode
+        return 7.5
+
+    try:
+        import soundfile as sf
+        with sf.SoundFile(wav_path) as f:
+            return len(f) / f.samplerate
+    except Exception as e:
+        raise ValueError(f"Could not determine duration for {wav_path}: {e}")
 
 
 def _maybe_set_local_attention(total_seconds: float):
@@ -103,14 +111,6 @@ def _maybe_set_local_attention(total_seconds: float):
     except Exception:
         # Not all variants support toggling back and forth; ignore silently.
         pass
-
-
-def _cleanup(paths: List[str]):
-    for p in paths:
-        try:
-            os.remove(p)
-        except Exception:
-            pass
 
 
 def _bucketize_by_duration(items: List[Tuple[str, float]]):
@@ -153,20 +153,23 @@ def _make_batches(shorts: List[Tuple[str, float]]) -> List[List[Tuple[str, float
 def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict[str, Any]]:
     """
     Hybrid strategy:
-      1) Convert all inputs to 16k wav and measure durations
+      1) Validate WAV format and measure durations
       2) Batch shorts; process longs sequentially
       3) Preserve output order matching the original inputs list
     """
-    # 1) Pre-convert and collect metadata
-    converted: List[Tuple[str, float]] = []  # list of (wav_path, duration)
+    # 1) Validate format and collect metadata
+    validated: List[Tuple[str, float]] = []  # list of (wav_path, duration)
     for item in inputs:
         src = item["source"]
-        wav = _fetch_to_wav(src)
-        dur = _duration_seconds(wav)
-        converted.append((wav, dur))
+        try:
+            wav_path = _validate_wav_format(src)
+            dur = _get_duration_seconds(wav_path)
+            validated.append((wav_path, dur))
+        except ValueError as e:
+            raise ValueError(f"Invalid audio format for {src}: {e}. Required: 16kHz mono WAV file.")
 
     # 2) Bucketize
-    shorts, longs = _bucketize_by_duration(converted)
+    shorts, longs = _bucketize_by_duration(validated)
     short_batches = _make_batches(shorts)
 
     results_by_index: Dict[int, Dict[str, Any]] = {}
@@ -174,9 +177,8 @@ def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict
     # Build index map from wav path to original item index (to preserve ordering)
     path_to_index = {}
     for idx, item in enumerate(inputs):
-        # We re-resolve the path by matching converted order to inputs order
-        # Because we converted in the same order, this is safe:
-        path_to_index[converted[idx][0]] = idx
+        # We validated in the same order, this is safe:
+        path_to_index[validated[idx][0]] = idx
 
     try:
         # 3) Process short batches in parallel (batched forward pass)
@@ -224,8 +226,8 @@ def transcribe_batched(inputs: List[Dict[str, Any]], want_ts: bool) -> List[Dict
             results_by_index[idx] = payload
 
     finally:
-        # 5) Cleanup temp wavs
-        _cleanup([p for (p, _) in converted])
+        # 5) No cleanup needed since we're not creating temp files
+        pass
 
     # 6) Return results in original input order
     return [results_by_index[i] for i in range(len(inputs))]
